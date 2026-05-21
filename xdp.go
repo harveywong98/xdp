@@ -833,22 +833,26 @@ func (xsk *Socket) FrameSizeStats() FrameSizeStats {
 }
 
 // UMEMStats is a point-in-time snapshot of UMEM frame pool occupancy.
+// RX frames occupy [0, FillRingNumDescs), TX frames occupy [FillRingNumDescs, NumFrames).
 type UMEMStats struct {
-	TotalFrames  int
-	UsedRXFrames int
-	UsedTXFrames int
+	TotalRXFrames int
+	UsedRXFrames  int
+	TotalTXFrames int
+	UsedTXFrames  int
 }
 
 // UMEMStats returns a point-in-time snapshot of UMEM frame pool occupancy.
 func (xsk *Socket) UMEMStats() UMEMStats {
+	rxEnd := xsk.options.FillRingNumDescs
 	var s UMEMStats
-	s.TotalFrames = xsk.options.NumFrames
-	for _, free := range xsk.freeRXDescs {
+	s.TotalRXFrames = rxEnd
+	s.TotalTXFrames = xsk.options.NumFrames - rxEnd
+	for _, free := range xsk.freeRXDescs[:rxEnd] {
 		if !free {
 			s.UsedRXFrames++
 		}
 	}
-	for _, free := range xsk.freeTXDescs {
+	for _, free := range xsk.freeTXDescs[rxEnd:] {
 		if !free {
 			s.UsedTXFrames++
 		}
