@@ -105,11 +105,32 @@ import (
 	"fmt"
 	"reflect"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
 )
+
+const frameSizeNumSlots = 5 // 5 个 1s slot，覆盖最近 5 秒
+
+// frameSizeSlot 是一个 1s 时间片内的帧大小统计。
+type frameSizeSlot struct {
+	buckets        [4]uint64 // [i]: 利用率落在 [i*25%, (i+1)*25%) 的帧数
+	truncatedCount uint64    // len >= frameSize，可能被截断
+	maxLen         uint32
+	totalSampled   uint64
+	ts             int64 // slot 对应的秒级时间戳（Unix 秒）
+}
+
+// FrameSizeStats 是最近 5 秒的帧大小分布统计，由 FrameSizeStats() 返回。
+type FrameSizeStats struct {
+	// Buckets[i] 为帧利用率落在 [i*25%, (i+1)*25%) 的帧数，i=3 含 100%。
+	Buckets        [4]uint64
+	TruncatedCount uint64 // Len >= FrameSize，包可能被截断，FrameSize 可能偏小
+	MaxLen         uint32 // 窗口内最大包长，可作为 FrameSize 下限参考
+	TotalSampled   uint64 // 窗口内总采样帧数，0 表示窗口内无数据
+}
 
 // DefaultSocketOptions is the default SocketOptions used by an xdp.Socket created without specifying options.
 var DefaultSocketOptions = SocketOptions{
@@ -151,6 +172,7 @@ type Socket struct {
 	options                  SocketOptions
 	rxDescs                  []Desc
 	getTXDescs, getRXDescs   []Desc
+	frameSizeSlots           [frameSizeNumSlots]frameSizeSlot
 }
 
 // SocketOptions are configuration settings used to bind an XDP socket.
@@ -438,6 +460,13 @@ func (xsk *Socket) Receive(num int) []Desc {
 	*xsk.rxRing.Consumer = cons
 
 	xsk.numFilled -= len(descs)
+
+	if len(descs) > 0 {
+		now := time.Now().Unix()
+		for i := range descs {
+			xsk.recordFrameLen(descs[i].Len, now)
+		}
+	}
 
 	return descs
 }
@@ -752,5 +781,98 @@ func (xsk *Socket) Stats() (Stats, error) {
 	if rc != 0 {
 		return stats, fmt.Errorf("getsockopt XDP_STATISTICS failed with errno %d", errno)
 	}
+
 	return stats, nil
+}
+
+// recordFrameLen 将一帧的长度记入当前时间对应的 slot。
+func (xsk *Socket) recordFrameLen(l uint32, nowSec int64) {
+	idx := int(nowSec % frameSizeNumSlots)
+	s := &xsk.frameSizeSlots[idx]
+	if s.ts != nowSec {
+		// 新的时间片，清零复用
+		*s = frameSizeSlot{ts: nowSec}
+	}
+	s.totalSampled++
+	ratio := float64(l) / float64(xsk.options.FrameSize)
+	bi := int(ratio * 4)
+	if bi >= 4 {
+		bi = 3
+	}
+	s.buckets[bi]++
+	if l >= uint32(xsk.options.FrameSize) {
+		s.truncatedCount++
+	}
+	if l > s.maxLen {
+		s.maxLen = l
+	}
+}
+
+// FrameSizeStats returns frame size distribution statistics aggregated over
+// the most recent 5-second sliding window. TotalSampled == 0 means no frames
+// were received in the window.
+func (xsk *Socket) FrameSizeStats() FrameSizeStats {
+	nowSec := time.Now().Unix()
+	cutoff := nowSec - int64(frameSizeNumSlots) + 1
+	var out FrameSizeStats
+	for i := range xsk.frameSizeSlots {
+		s := &xsk.frameSizeSlots[i]
+		if s.ts < cutoff || s.totalSampled == 0 {
+			continue
+		}
+		for j := range s.buckets {
+			out.Buckets[j] += s.buckets[j]
+		}
+		out.TruncatedCount += s.truncatedCount
+		out.TotalSampled += s.totalSampled
+		if s.maxLen > out.MaxLen {
+			out.MaxLen = s.maxLen
+		}
+	}
+	return out
+}
+
+// UMEMStats is a point-in-time snapshot of UMEM frame pool occupancy.
+type UMEMStats struct {
+	TotalFrames  int
+	UsedRXFrames int
+	UsedTXFrames int
+}
+
+// UMEMStats returns a point-in-time snapshot of UMEM frame pool occupancy.
+func (xsk *Socket) UMEMStats() UMEMStats {
+	var s UMEMStats
+	s.TotalFrames = xsk.options.NumFrames
+	for _, free := range xsk.freeRXDescs {
+		if !free {
+			s.UsedRXFrames++
+		}
+	}
+	for _, free := range xsk.freeTXDescs {
+		if !free {
+			s.UsedTXFrames++
+		}
+	}
+	return s
+}
+
+// ObservabilityStats combines ring counters, UMEM frame pool occupancy and
+// frame size distribution into a single call.
+type ObservabilityStats struct {
+	Stats          Stats
+	UMEMStats      UMEMStats
+	FrameSizeStats FrameSizeStats
+}
+
+// ObservabilityStats returns Stats, UMEMStats and FrameSizeStats together.
+func (xsk *Socket) ObservabilityStats() (ObservabilityStats, error) {
+	stats, err := xsk.Stats()
+	if err != nil {
+		return ObservabilityStats{}, err
+	}
+	return ObservabilityStats{
+		Stats:          stats,
+		UMEMStats:      xsk.UMEMStats(),
+		FrameSizeStats: xsk.FrameSizeStats(),
+	}, nil
 }
