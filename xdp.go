@@ -832,24 +832,23 @@ func (xsk *Socket) FrameSizeStats() FrameSizeStats {
 	return out
 }
 
-// UMEMStats is a point-in-time snapshot of UMEM frame pool occupancy.
+// UMEMStats is a point-in-time snapshot of UMEM physical frame pool occupancy.
 type UMEMStats struct {
-	// UMEM 物理帧池
 	TotalFrames  int // NumFrames
 	UsedRXFrames int // freeRXDescs 中 false 的数量
 	UsedTXFrames int // freeTXDescs 中 false 的数量
-	// Ring 配置大小（供参考）
+}
+
+// RingStats contains the configured descriptor counts for Fill and RX rings.
+type RingStats struct {
 	FillRingSize int // FillRingNumDescs
 	RxRingSize   int // RxRingNumDescs
 }
 
 // UMEMStats returns a point-in-time snapshot of UMEM frame pool occupancy.
 func (xsk *Socket) UMEMStats() UMEMStats {
-	s := UMEMStats{
-		TotalFrames:  xsk.options.NumFrames,
-		FillRingSize: xsk.options.FillRingNumDescs,
-		RxRingSize:   xsk.options.RxRingNumDescs,
-	}
+	var s UMEMStats
+	s.TotalFrames = xsk.options.NumFrames
 	for _, free := range xsk.freeRXDescs {
 		if !free {
 			s.UsedRXFrames++
@@ -863,15 +862,24 @@ func (xsk *Socket) UMEMStats() UMEMStats {
 	return s
 }
 
-// ObservabilityStats combines ring counters, UMEM frame pool occupancy and
-// frame size distribution into a single call.
+// RingStats returns the configured descriptor counts for Fill and RX rings.
+func (xsk *Socket) RingStats() RingStats {
+	return RingStats{
+		FillRingSize: xsk.options.FillRingNumDescs,
+		RxRingSize:   xsk.options.RxRingNumDescs,
+	}
+}
+
+// ObservabilityStats combines ring counters, UMEM frame pool occupancy,
+// ring descriptor counts and frame size distribution into a single call.
 type ObservabilityStats struct {
 	Stats          Stats
 	UMEMStats      UMEMStats
+	RingStats      RingStats
 	FrameSizeStats FrameSizeStats
 }
 
-// ObservabilityStats returns Stats, UMEMStats and FrameSizeStats together.
+// ObservabilityStats returns Stats, UMEMStats, RingStats and FrameSizeStats together.
 func (xsk *Socket) ObservabilityStats() (ObservabilityStats, error) {
 	stats, err := xsk.Stats()
 	if err != nil {
@@ -880,6 +888,7 @@ func (xsk *Socket) ObservabilityStats() (ObservabilityStats, error) {
 	return ObservabilityStats{
 		Stats:          stats,
 		UMEMStats:      xsk.UMEMStats(),
+		RingStats:      xsk.RingStats(),
 		FrameSizeStats: xsk.FrameSizeStats(),
 	}, nil
 }
