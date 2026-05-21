@@ -833,26 +833,29 @@ func (xsk *Socket) FrameSizeStats() FrameSizeStats {
 }
 
 // UMEMStats is a point-in-time snapshot of UMEM frame pool occupancy.
-// RX frames occupy [0, FillRingNumDescs), TX frames occupy [FillRingNumDescs, NumFrames).
 type UMEMStats struct {
-	TotalRXFrames int
-	UsedRXFrames  int
-	TotalTXFrames int
-	UsedTXFrames  int
+	// UMEM 物理帧池
+	TotalFrames  int // NumFrames
+	UsedRXFrames int // freeRXDescs 中 false 的数量
+	UsedTXFrames int // freeTXDescs 中 false 的数量
+	// Ring 配置大小（供参考）
+	FillRingSize int // FillRingNumDescs
+	RxRingSize   int // RxRingNumDescs
 }
 
 // UMEMStats returns a point-in-time snapshot of UMEM frame pool occupancy.
 func (xsk *Socket) UMEMStats() UMEMStats {
-	rxEnd := xsk.options.FillRingNumDescs
-	var s UMEMStats
-	s.TotalRXFrames = rxEnd
-	s.TotalTXFrames = xsk.options.NumFrames - rxEnd
-	for _, free := range xsk.freeRXDescs[:rxEnd] {
+	s := UMEMStats{
+		TotalFrames:  xsk.options.NumFrames,
+		FillRingSize: xsk.options.FillRingNumDescs,
+		RxRingSize:   xsk.options.RxRingNumDescs,
+	}
+	for _, free := range xsk.freeRXDescs {
 		if !free {
 			s.UsedRXFrames++
 		}
 	}
-	for _, free := range xsk.freeTXDescs[rxEnd:] {
+	for _, free := range xsk.freeTXDescs {
 		if !free {
 			s.UsedTXFrames++
 		}
