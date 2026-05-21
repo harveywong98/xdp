@@ -1,4 +1,4 @@
-module github.com/slavc/xdp
+module github.com/harveywong98/xdp
 
 go 1.13
 
